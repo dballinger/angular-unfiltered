@@ -1,0 +1,133 @@
+apply plugin: 'jetty'
+apply plugin: 'war'
+apply plugin: 'scala'
+
+repositories {
+    mavenLocal()
+    mavenRepo name: "sbt-idea-repo", url: "http://mpeltonen.github.com/maven/"
+    mavenRepo name: "Maven Repository", url: "http://repo1.maven.org/maven2/"
+    mavenRepo name: "Maven Repository 2", url: "http://repo2.maven.org/maven2/"
+    mavenRepo name: "Typesafe Repository", url: "http://repo.typesafe.com/typesafe/releases/"
+    mavenRepo name: "soft-props", url: "http://dl.bintray.com/content/softprops/maven/"
+}
+
+dependencies {
+    scalaTools 'org.scala-lang:scala-compiler:2.10.1'
+    scalaTools 'org.scala-lang:scala-library:2.10.1'
+
+    compile([
+            "net.databinder:unfiltered-filter_2.10:0.6.8",
+            "net.databinder:unfiltered-jetty_2.10:0.6.8",
+            "org.clapper:avsl_2.10:1.0.1",
+            "org.clapper:grizzled-slf4j_2.10:1.0.1",
+            "joda-time:joda-time:2.1",
+            "org.joda:joda-convert:1.2",
+            'net.liftweb:lift-json_2.10:2.5-RC5',
+            'net.liftweb:lift-json-ext_2.10:2.5-RC5'
+    ])
+
+    testCompile([
+            "org.scalatest:scalatest_2.10:1.9.1",
+            "com.jayway.restassured:rest-assured:1.6.2"
+    ])
+
+}
+
+jar {
+    from {
+        configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
+    } {
+        exclude "META-INF/*.SF"
+        exclude "META-INF/*.DSA"
+        exclude "META-INF/*.RSA"
+    }
+    manifest { attributes 'Main-Class': 'com.braxisltd.angularunfiltered.Run' }
+}
+
+task copyweb(type: Copy) {
+    from 'app'
+    into 'build/web/app'
+}
+
+war {
+    from 'build/web' // adds a file-set to the root of the archive
+    webXml = file('src/main/resources/web.xml') // copies a file to WEB-INF/web.xml
+}
+
+war.dependsOn copyweb
+
+task scalatest(dependsOn: testClasses, description: "Run ScalaTest runner", type: Test) << {
+    ant.taskdef(
+            name: 'scalatest',
+            classname: 'org.scalatest.tools.ScalaTestAntTask',
+            classpath: sourceSets.test.runtimeClasspath.asPath
+    )
+    ant.scalatest(
+            runpath: sourceSets.test.output.classesDir,
+            haltonfailure: 'true',
+            fork: 'false'
+    ) {
+        reporter(type: 'stdout')
+        reporter(type: 'junitxml', directory: testResultsDir)
+    }
+}
+
+task jsunit << {
+    def os = System.getProperty("os.name").toLowerCase()
+    def unit
+    if (os.contains("windows")) {
+        unit = new File("js-test/scripts/gradle-unit.bat").canonicalPath
+    } else {
+        unit = "sh " + new File("js-test/scripts/gradle-unit.sh").canonicalPath
+    }
+    getLogger().lifecycle("running unit tests")
+    getLogger().lifecycle(unit.execute().getText())
+    checkReport("unit.xml")
+}
+
+task jsscenario(dependsOn: war) << {
+    def os = System.getProperty("os.name").toLowerCase()
+    def scenarios
+    if (os.contains("windows")) {
+        scenarios = new File("js-test/scripts/gradle-scenarios.bat").canonicalPath
+    } else {
+        scenarios = "sh " + new File("js-test/scripts/gradle-scenarios.sh").canonicalPath
+    }
+    getLogger().lifecycle("running scenario tests")
+    getLogger().lifecycle(scenarios.execute().getText())
+    checkReport("e2e.xml")
+}
+
+jsscenario.doFirst {
+    jettyRunWar.daemon = true
+    jettyRunWar.execute()
+}
+
+jsscenario.doLast {
+    jettyStop.execute()
+}
+
+def checkReport(String reportName) {
+    def testsuites = new XmlSlurper().parse(new File("${buildDir}/reports/" + reportName))
+    testsuites.testsuite.each { testsuite ->
+        def errors = testsuite.@errors.text().asType(Integer.class)
+        def failures = testsuite.@failures.text().asType(Integer.class)
+        if (errors > 0 || failures > 0) {
+            testsuite.testcase.each { testcase ->
+                testcase.failure.list().each { failure ->
+                    println("${testcase.@name}:\r\n \t ${failure}")
+                }
+            }
+
+            throw new GradleException("Failures: ${failures}, Errors: ${errors}")
+        }
+    }
+}
+
+task alltests(dependsOn: [scalatest, jsunit, jsscenario]) << {
+
+}
+
+stopKey = 'foo'
+stopPort = 9451
+httpPort = 8080
